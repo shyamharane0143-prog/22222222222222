@@ -22,7 +22,14 @@ async def favicon_route_handler(request):
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
-    return web.json_response("dreamxbotz")
+    try:
+        with open("dreamxbotz/template/Invalid.html", "r", encoding="utf-8") as f:
+            return web.Response(text=f.read(), content_type="text/html")
+    except Exception as e:
+        return web.Response(
+            text="<h1>Restricted Cloud Node</h1><p>Visit official Telegram bot: <a href='https://t.me/BoultflixMovieBot'>@BoultflixMovieBot</a></p>",
+            content_type="text/html"
+        )
 
 @routes.get(r"/watch/{path:\S+}", allow_head=True)
 async def watch_handler(request: web.Request):
