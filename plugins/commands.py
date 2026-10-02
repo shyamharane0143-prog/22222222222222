@@ -88,6 +88,45 @@ async def start(client, message):
             await asyncio.sleep(300)
             await dlt.delete()
             return         
+        # Verification completion for GETFILE/search links.
+        # This is intentionally handled before normal start payload processing.
+        if len(m.command) == 2 and m.command[1].startswith('verifysearch_'):
+            try:
+                _, userid, verify_id, encoded_query = m.command[1].split('_', 3)
+                user_id = int(userid)
+                if user_id != m.from_user.id:
+                    return await m.reply_text(script.LINK_EXPIRED_TXT)
+
+                verify_id_info = await db.get_verify_id_info(user_id, verify_id)
+                if not verify_id_info or verify_id_info.get('verified'):
+                    return await m.reply_text(script.LINK_EXPIRED_TXT)
+
+                settings = await get_settings(0)
+                if not settings.get('is_verify', IS_VERIFY):
+                    # Verification was disabled while the link was being processed.
+                    pass
+                else:
+                    ist_timezone = pytz.timezone('Asia/Kolkata')
+                    current_time = datetime.now(tz=ist_timezone)
+                    await db.update_notcopy_user(user_id, {'last_verified': current_time})
+                    await db.update_verify_id_info(user_id, verify_id, {'verified': True})
+
+                padded = encoded_query + '=' * (-len(encoded_query) % 4)
+                movie = base64.urlsafe_b64decode(padded).decode('utf-8')
+                getfile_url = f"https://telegram.me/{temp.U_NAME}?start=getfile-{movie.replace(' ', '-')}"
+                buttons = [[
+                    InlineKeyboardButton("✅ ᴄʟɪᴄᴋ ʜᴇʀᴇ ᴛᴏ ɢᴇᴛ ғɪʟᴇs ✅", url=getfile_url)
+                ]]
+                await m.reply_text(
+                    script.VERIFY_COMPLETE_TEXT.format(m.from_user.mention),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    parse_mode=enums.ParseMode.HTML
+                )
+                return
+            except Exception as e:
+                logger.error("Error in getfile verification: %s", e)
+                return await m.reply_text(script.LINK_EXPIRED_TXT)
+
         if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
             buttons = [[
                         InlineKeyboardButton('❤️ ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ ❤️', url=f'http://t.me/{temp.U_NAME}?startgroup=true')
@@ -237,10 +276,59 @@ async def start(client, message):
             )
             return  
 
+        # GETFILE LINKS: these are used by movie-update/channel posts.
+        # IMPORTANT: do not call auto_filter() directly here when verification is enabled.
+        # The old code bypassed the verification gate entirely.
         if len(message.command) == 2 and message.command[1].startswith('getfile'):
-            movies = message.command[1].split("-", 1)[1] 
-            movie = movies.replace('-',' ')
-            message.text = movie 
+            getfile_arg = message.command[1].split("-", 1)[1]
+            movie = getfile_arg.replace('-', ' ')
+            user_id = message.from_user.id
+
+            # getfile links do not carry a group id, so use the global/default settings
+            # (group 0). This keeps channel-post getfile buttons protected by IS_VERIFY.
+            getfile_settings = await get_settings(0)
+            verification_enabled = getfile_settings.get('is_verify', IS_VERIFY)
+
+            if verification_enabled and not await db.has_premium_access(user_id):
+                if not await db.is_user_verified(user_id):
+                    verify_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+                    await db.create_verify_id(user_id, verify_id)
+
+                    # Preserve the search query through the verification flow.
+                    encoded_query = base64.urlsafe_b64encode(
+                        movie.encode('utf-8')
+                    ).decode('ascii').rstrip('=')
+                    verify_link = f"https://telegram.me/{temp.U_NAME}?start=verifysearch_{user_id}_{verify_id}_{encoded_query}"
+
+                    try:
+                        verify_link = await get_shortlink(verify_link, 0, False, False)
+                    except Exception as e:
+                        logger.warning("Getfile verification shortlink failed: %s", e)
+
+                    tutorial = getfile_settings.get('tutorial', TUTORIAL)
+                    buttons = [[
+                        InlineKeyboardButton(
+                            text="♻️ ᴄʟɪᴄᴋ ʜᴇʀᴇ ᴛᴏ ᴠᴇʀɪꜰʏ ♻️",
+                            url=verify_link
+                        )
+                    ]]
+                    if tutorial:
+                        buttons.append([
+                            InlineKeyboardButton(
+                                text="⁉️ ʜᴏᴡ ᴛᴏ ᴠᴇʀɪꜰʏ ⁉️",
+                                url=tutorial
+                            )
+                        ])
+
+                    await message.reply_text(
+                        script.VERIFICATION_TEXT.format(message.from_user.mention),
+                        protect_content=True,
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                        parse_mode=enums.ParseMode.HTML
+                    )
+                    raise StopPropagation
+
+            message.text = movie
             await auto_filter(client, message)
             raise StopPropagation
 
